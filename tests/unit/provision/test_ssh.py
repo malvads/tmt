@@ -7,10 +7,15 @@ import pytest
 
 import tmt.log
 from tmt.guest import (
+    GuestSsh,
+    GuestSshData,
+    SSHMasterProcessFailedToStartError,
     _socket_path_hash,
     _socket_path_trivial,
 )
-from tmt.utils import Path
+from tmt.steps.provision import Provision
+from tmt.utils import CommandOutput, Path
+from tmt.utils.wait import Deadline, Waiting
 
 
 @pytest.mark.parametrize(
@@ -132,3 +137,32 @@ def test_socket_path_hash_conflict(monkeypatch, root_logger: tmt.log.Logger) -> 
 
     assert re.match(r'/tmp/[a-z0-9]{4}.socket', str(actual1))
     assert re.match(r'/tmp/[a-z0-9]{5}.socket', str(actual2))
+
+
+def test_reconnect_retries_after_ssh_master_process_failure(
+    monkeypatch, root_logger: tmt.log.Logger
+) -> None:
+    """Reconnect should retry when starting the SSH master process fails."""
+    mock_provision = MagicMock(spec=Provision)
+    guest = GuestSsh(
+        logger=root_logger,
+        parent=mock_provision,
+        name='guest',
+        data=GuestSshData(primary_address='192.0.2.1'),
+    )
+    ssh_master_start_failure = SSHMasterProcessFailedToStartError()
+    successful_whoami = CommandOutput(stdout='root\n', stderr=None)
+    mock_execute = MagicMock(
+        side_effect=[
+            ssh_master_start_failure,
+            successful_whoami,
+        ]
+    )
+    monkeypatch.setattr(guest, 'execute', mock_execute)
+
+    reconnect_wait = Waiting(Deadline.from_seconds(5), tick=0)
+
+    reconnect_succeeded = guest.reconnect(reconnect_wait)
+
+    assert reconnect_succeeded is True
+    assert mock_execute.call_count == 2
