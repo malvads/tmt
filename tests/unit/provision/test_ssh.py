@@ -7,10 +7,32 @@ import pytest
 
 import tmt.log
 from tmt.guest import (
+    GuestSsh,
+    GuestSshData,
     _socket_path_hash,
     _socket_path_trivial,
 )
+from tmt.steps.provision import Provision
 from tmt.utils import Path
+
+TEST_RUN_WORKDIR = Path('/tmp/run')
+TEST_GUESTS: tuple[tuple[str, str], ...] = (
+    ('guest-one', '192.0.2.1'),
+    ('guest-two', '192.0.2.2'),
+)
+
+
+def _make_test_guests(parent: Provision, logger: tmt.log.Logger) -> dict[str, GuestSsh]:
+    """Create the two guests used by the multi-guest SSH regression tests."""
+    return {
+        name: GuestSsh(
+            logger=logger,
+            parent=parent,
+            name=name,
+            data=GuestSshData(primary_address=address),
+        )
+        for name, address in TEST_GUESTS
+    }
 
 
 @pytest.mark.parametrize(
@@ -132,3 +154,25 @@ def test_socket_path_hash_conflict(monkeypatch, root_logger: tmt.log.Logger) -> 
 
     assert re.match(r'/tmp/[a-z0-9]{4}.socket', str(actual1))
     assert re.match(r'/tmp/[a-z0-9]{5}.socket', str(actual2))
+
+
+def test_ssh_does_not_share_socket_between_guests(
+    monkeypatch, root_logger: tmt.log.Logger
+) -> None:
+    """SSH master sockets must be unique for multiple guests in one plan."""
+    mock_mkdir = MagicMock(name='<mock>Path.mkdir')
+    monkeypatch.setattr(Path, 'mkdir', mock_mkdir)
+
+    mock_provision = MagicMock(spec=Provision)
+    mock_provision.run_workdir = TEST_RUN_WORKDIR
+    guests = _make_test_guests(mock_provision, root_logger)
+
+    socket_paths = {name: guest._ssh_master_socket_path for name, guest in guests.items()}
+    assert len(set(socket_paths.values())) == len(guests)
+
+    ssh_socket_options = {
+        name: [option for option in guest._ssh_options.to_popen() if option.startswith('-S')]
+        for name, guest in guests.items()
+    }
+    expected_socket_options = {name: [f'-S{path}'] for name, path in socket_paths.items()}
+    assert ssh_socket_options == expected_socket_options
